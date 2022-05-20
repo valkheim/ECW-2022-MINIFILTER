@@ -2,6 +2,8 @@ find_package(WDK REQUIRED)
 
 set(target kapp)
 
+# target_compile_options(${target} PRIVATE "/Ob1") # inline functions expansion
+
 file(GLOB_RECURSE sources "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 file(GLOB_RECURSE headers "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
 

@@ -1,5 +1,11 @@
 #include "main.h"
 
+UCHAR g_key[4];// = {0xaa, 0xbb, 0xcc, 0xdd };
+static_assert(sizeof(g_key) == sizeof(ULONG));
+
+#define DBGPRINT(x, ...)
+//#define DBGPRINT(msg, ...) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, msg"\n", __VA_ARGS__)
+
 PFLT_FILTER FilterHandle = nullptr;
 
 CONST FLT_OPERATION_REGISTRATION Callbacks[] = {            // The minifilter driver usees callbacks to indicate which operations it's interested in
@@ -43,14 +49,14 @@ static bool IsValidDirectory(_In_ PUNICODE_STRING directory)
     ULONG maxSize = 1024;
     if (directory->Length > maxSize)
     {
-        DbgPrint("IsValidDirectory: invalid length\n");
+        DBGPRINT("IsValidDirectory: invalid length\n");
         return false;
     }
 
     auto copy = (WCHAR*)ExAllocatePoolWithTag(PagedPool, maxSize + sizeof(WCHAR), DRIVER_TAG);
     if (!copy)
     {
-        DbgPrint("IsValidDirectory: cannot allocate copy\n");
+        DBGPRINT("IsValidDirectory: cannot allocate copy\n");
         return false;
     }
 
@@ -71,7 +77,7 @@ FLT_POSTOP_CALLBACK_STATUS PostCreateOperation(_Inout_ PFLT_CALLBACK_DATA Data, 
     //UNREFERENCED_PARAMETER(Flags);              // A bitmask of flags that specifies how the post-operation callback is to be performed
     if (Flags & FLTFL_POST_OPERATION_DRAINING || FltObjects->FileObject->DeletePending)
     {
-        //DbgPrint("PostCreateOperation: the filter instance is being detached or the file is opened for deletion\n");
+        //DBGPRINT("PostCreateOperation: the filter instance is being detached or the file is opened for deletion\n");
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
@@ -80,33 +86,33 @@ FLT_POSTOP_CALLBACK_STATUS PostCreateOperation(_Inout_ PFLT_CALLBACK_DATA Data, 
         || (params.SecurityContext->DesiredAccess & FILE_WRITE_DATA) == 0
         || Data->IoStatus.Information == FILE_DOES_NOT_EXIST)
     {
-        //DbgPrint("PostCreateOperation: kernel caller or not exists or no write access\n");
+        //DBGPRINT("PostCreateOperation: kernel caller or not exists or no write access\n");
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
     auto fileNameInfo = kl::FilterFileNameInformation(Data);
     if (!fileNameInfo)
     {
-        DbgPrint("PostCreateOperation: no filename info\n");
+        DBGPRINT("PostCreateOperation: no filename info\n");
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
     if (!NT_SUCCESS(fileNameInfo.Parse()))
     {
-        DbgPrint("PostCreateOperation: cannot parse filename info\n");
+        DBGPRINT("PostCreateOperation: cannot parse filename info\n");
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
-    //DbgPrint("PostCreateOperation:got %wZ\n", fileNameInfo->Name);
+    //DBGPRINT("PostCreateOperation:got %wZ\n", fileNameInfo->Name);
     if (fileNameInfo->Stream.Length > 0) // only the default data stream. Should check ::$DATA
     {
-        DbgPrint("PostCreateOperation: only the default data stream\n");
+        DBGPRINT("PostCreateOperation: only the default data stream\n");
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
     if (!IsValidDirectory(&fileNameInfo->ParentDir))
     {
-        //DbgPrint("PostCreateOperation: invalid parent directory\n");
+        //DBGPRINT("PostCreateOperation: invalid parent directory\n");
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
@@ -114,7 +120,7 @@ FLT_POSTOP_CALLBACK_STATUS PostCreateOperation(_Inout_ PFLT_CALLBACK_DATA Data, 
     auto status = FltAllocateContext(FltObjects->Filter, FLT_FILE_CONTEXT, sizeof(*context), PagedPool, (PFLT_CONTEXT*)&context);
     if (!NT_SUCCESS(status))
     {
-        DbgPrint("Failed to allocate file context (0x%08x)\n", status);
+        DBGPRINT("Failed to allocate file context (0x%08x)\n", status);
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
@@ -123,7 +129,7 @@ FLT_POSTOP_CALLBACK_STATUS PostCreateOperation(_Inout_ PFLT_CALLBACK_DATA Data, 
     context->FileName.Buffer = (WCHAR*)ExAllocatePoolWithTag(PagedPool, fileNameInfo->Name.Length, DRIVER_TAG);
     if (!context->FileName.Buffer)
     {
-        DbgPrint("PostCreateOperation: no failed to allocate file buffer\n");
+        DBGPRINT("PostCreateOperation: no failed to allocate file buffer\n");
         FltReleaseContext(context);
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
@@ -133,17 +139,27 @@ FLT_POSTOP_CALLBACK_STATUS PostCreateOperation(_Inout_ PFLT_CALLBACK_DATA Data, 
     // if more than one thread within the client process writes to the file at roughly the same time
     context->Lock.Init();
     // attach the context to the file object
-    DbgPrint("Set context for %wZ on FltObjects %p\n", context->FileName, FltObjects);
+    DBGPRINT("Set context for %wZ on FltObjects %p\n", context->FileName, FltObjects);
     status = FltSetFileContext(FltObjects->Instance, FltObjects->FileObject, FLT_SET_CONTEXT_KEEP_IF_EXISTS, context, nullptr);
     if (!NT_SUCCESS(status))
     {
-        DbgPrint("Failed to set file context (0x%08x)\n", status);
+        DBGPRINT("Failed to set file context (0x%08x)\n", status);
         ExFreePool(context->FileName.Buffer);
     }
 
     // decrement ref counter set by FltSetFileContext (refcount == 1 by FltAllocateContext)
     FltReleaseContext(context);
     return FLT_POSTOP_FINISHED_PROCESSING;
+}
+
+__forceinline void UpdateBuffer(UCHAR *buffer, ULONG size, ULONG chunk)
+{
+    UNREFERENCED_PARAMETER(chunk);
+    for (unsigned i = 0 ; i < size ; ++i)
+    {
+        *(buffer + i) = *(buffer + i) ^ g_key[i % sizeof(g_key)] ^ (UCHAR)chunk;
+        DBGPRINT("%d ", chunk);
+    }
 }
 
 NTSTATUS HandleFile(_In_ PUNICODE_STRING FileName, _In_ PCFLT_RELATED_OBJECTS FltObjects)
@@ -155,12 +171,12 @@ NTSTATUS HandleFile(_In_ PUNICODE_STRING FileName, _In_ PCFLT_RELATED_OBJECTS Fl
     void* buffer = nullptr;
     LARGE_INTEGER fileSize;
 
-    DbgPrint("HandleFile: handle %wZ\n", FileName);
+    DBGPRINT("HandleFile: handle %wZ\n", FileName);
     // Return if no data (size == 0)
     status = FsRtlGetFileSize(FltObjects->FileObject, &fileSize);
     if (!NT_SUCCESS(status) || fileSize.QuadPart == 0)
     {
-        DbgPrint("HandleFile: cannot get file size (0x%08x)\n", status);
+        DBGPRINT("HandleFile: cannot get file size (0x%08x)\n", status);
         return status;
     }
 
@@ -169,22 +185,22 @@ NTSTATUS HandleFile(_In_ PUNICODE_STRING FileName, _In_ PCFLT_RELATED_OBJECTS Fl
         InitializeObjectAttributes(&sourceFileAttr, FileName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, nullptr, nullptr);
         // Open the source file (ZwCreateFile would send I/O requests to the top of the file system driver stack)
         status = FltCreateFile(
-            FltObjects->Filter,		                                // filter object
-            FltObjects->Instance,	                                // filter instance
-            &hSourceFile,			                                // resulting handle
+            FltObjects->Filter,                                        // filter object
+            FltObjects->Instance,                                    // filter instance
+            &hSourceFile,                                            // resulting handle
             FILE_READ_DATA | SYNCHRONIZE,                           // access mask
-            &sourceFileAttr,		                                // object attributes
-            &ioStatus,				                                // resulting status
-            nullptr, FILE_ATTRIBUTE_NORMAL, 	                    // allocation size, file attributes
-            FILE_SHARE_READ | FILE_SHARE_WRITE,		                // share flags
-            FILE_OPEN,		                                        // create disposition
+            &sourceFileAttr,                                        // object attributes
+            &ioStatus,                                                // resulting status
+            nullptr, FILE_ATTRIBUTE_NORMAL,                         // allocation size, file attributes
+            FILE_SHARE_READ | FILE_SHARE_WRITE,                        // share flags
+            FILE_OPEN,                                                // create disposition
             FILE_SYNCHRONOUS_IO_NONALERT | FILE_SEQUENTIAL_ONLY,    // create options (sync I/O)
-            nullptr, 0,				                                // extended attributes, EA length
+            nullptr, 0,                                                // extended attributes, EA length
             IO_IGNORE_SHARE_ACCESS_CHECK                            // flags
         );
         if (!NT_SUCCESS(status))
         {
-            DbgPrint("HandleFile: cannot open the source file (0x%08x)\n", status);
+            DBGPRINT("HandleFile: cannot open the source file (0x%08x)\n", status);
             break;
         }
 
@@ -195,7 +211,7 @@ NTSTATUS HandleFile(_In_ PUNICODE_STRING FileName, _In_ PCFLT_RELATED_OBJECTS Fl
         targetFileName.Buffer = (WCHAR*)ExAllocatePoolWithTag(PagedPool, targetFileName.MaximumLength, DRIVER_TAG);
         if (targetFileName.Buffer == nullptr)
         {
-            DbgPrint("HandleFile: cannot allocate target file buffer\n");
+            DBGPRINT("HandleFile: cannot allocate target file buffer\n");
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
@@ -205,75 +221,77 @@ NTSTATUS HandleFile(_In_ PUNICODE_STRING FileName, _In_ PCFLT_RELATED_OBJECTS Fl
         OBJECT_ATTRIBUTES targetFileAttr;
         InitializeObjectAttributes(&targetFileAttr, &targetFileName, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, nullptr, nullptr);
         status = FltCreateFile(
-            FltObjects->Filter,		                                // filter object
-            FltObjects->Instance,	                                // filter instance
-            &hTargetFile,			                                // resulting handle
+            FltObjects->Filter,                                        // filter object
+            FltObjects->Instance,                                    // filter instance
+            &hTargetFile,                                            // resulting handle
             GENERIC_WRITE | SYNCHRONIZE,                            // access mask
-            &targetFileAttr,		                                // object attributes
-            &ioStatus,				                                // resulting status
-            nullptr, FILE_ATTRIBUTE_NORMAL, 	                    // allocation size, file attributes
-            0,		                                                // share flags
-            FILE_OVERWRITE_IF,		                                // create disposition
+            &targetFileAttr,                                        // object attributes
+            &ioStatus,                                                // resulting status
+            nullptr, FILE_ATTRIBUTE_NORMAL,                         // allocation size, file attributes
+            0,                                                        // share flags
+            FILE_OVERWRITE_IF,                                        // create disposition
             FILE_SYNCHRONOUS_IO_NONALERT | FILE_SEQUENTIAL_ONLY,    // create options (sync I/O)
-            nullptr, 0,		                                        // extended attributes, EA length
-            0 /*IO_IGNORE_SHARE_ACCESS_CHECK*/	                    // flags
+            nullptr, 0,                                                // extended attributes, EA length
+            0 /*IO_IGNORE_SHARE_ACCESS_CHECK*/                        // flags
         );
         ExFreePool(targetFileName.Buffer);
         if (!NT_SUCCESS(status))
         {
-            DbgPrint("HandleFile: cannot open target file (0x%08x)\n", status);
+            DBGPRINT("HandleFile: cannot open target file (0x%08x)\n", status);
             break;
         }
 
         // copy chunks from source to target
         // allocate buffer for copying purposes
-        ULONG size = 1 << 21;	// 2 MB
+        ULONG size = 7;
         buffer = ExAllocatePoolWithTag(PagedPool, size, DRIVER_TAG);
         if (!buffer)
         {
-            DbgPrint("HandleFile: cannot allocate chunk\n");
+            DBGPRINT("HandleFile: cannot allocate chunk\n");
             status = STATUS_INSUFFICIENT_RESOURCES;
             break;
         }
 
         // loop - read from source, write to target
-        LARGE_INTEGER offset = { 0 };		// read
-        LARGE_INTEGER writeOffset = { 0 };	// write
+        LARGE_INTEGER offset = { 0 };       // read
+        LARGE_INTEGER writeOffset = { 0 };  // write
         ULONG bytes;
         auto saveSize = fileSize;
+        ULONG chunk = 1;
         while (fileSize.QuadPart > 0)
         {
             status = ZwReadFile(
                 hSourceFile,
-                nullptr,	                                    // optional KEVENT
-                nullptr, nullptr,	                            // no APC
+                nullptr,                                        // optional KEVENT
+                nullptr, nullptr,                               // no APC
                 &ioStatus,
                 buffer,
                 (ULONG)min((LONGLONG)size, fileSize.QuadPart),  // number of bytes
-                &offset,	                                    // offset
-                nullptr  	                                    // optional key
+                &offset,                                        // offset
+                nullptr                                         // optional key
             );
             if (!NT_SUCCESS(status))
             {
-                DbgPrint("HandleFile: cannot read source chunk (0x%08x)\n", status);
+                DBGPRINT("HandleFile: cannot read source chunk (0x%08x)\n", status);
                 break;
             }
 
             bytes = (ULONG)ioStatus.Information;
+            UpdateBuffer((UCHAR*)buffer, bytes, chunk++);
             // write to target file
             status = ZwWriteFile(
-                hTargetFile,	    // target handle
-                nullptr,		    // optional KEVENT
+                hTargetFile,        // target handle
+                nullptr,            // optional KEVENT
                 nullptr, nullptr,   // APC routine, APC context
-                &ioStatus,		    // I/O status result
-                buffer,			    // data to write
+                &ioStatus,          // I/O status result
+                buffer,             // data to write
                 bytes,              // number of bytes to write
-                &writeOffset,	    // offset
-                nullptr		        // optional key
+                &writeOffset,       // offset
+                nullptr             // optional key
             );
             if (!NT_SUCCESS(status))
             {
-                DbgPrint("HandleFile: cannot write target chunk (0x%08x)\n", status);
+                DBGPRINT("HandleFile: cannot write target chunk (0x%08x)\n", status);
                 break;
             }
 
@@ -309,26 +327,26 @@ NTSTATUS HandleFile(_In_ PUNICODE_STRING FileName, _In_ PCFLT_RELATED_OBJECTS Fl
 FLT_PREOP_CALLBACK_STATUS PreWriteOperation(_Inout_ PFLT_CALLBACK_DATA Data, _In_ PCFLT_RELATED_OBJECTS FltObjects, _Flt_CompletionContext_Outptr_ PVOID* CompletionContext)
 {
     UNREFERENCED_PARAMETER(Data);               // Pointer to the callback data structure for the I/O operation
-    //UNREFERENCED_PARAMETER(FltObjects);         // Pointer to an FLT_RELATED_OBJECTS strcture that contains opaque pointers for the objects related to the current I/O request
+    //UNREFERENCED_PARAMETER(FltObjects);       // Pointer to an FLT_RELATED_OBJECTS strcture that contains opaque pointers for the objects related to the current I/O request
     UNREFERENCED_PARAMETER(CompletionContext);  // Pointer to an optional context in case this callacks returns FLT_PREOP_SUCCESS_WITH_CALLBACK or FLT_PREOP_SYNCHRONIZE
     FileContext* context = nullptr;
-    //DbgPrint("Get context on FltObjects %p\n", FltObjects);
+    //DBGPRINT("Get context on FltObjects %p\n", FltObjects);
     auto status = FltGetFileContext(FltObjects->Instance, FltObjects->FileObject, (PFLT_CONTEXT*)&context);
     if (!NT_SUCCESS(status) || context == nullptr)
     {
-        //DbgPrint("PreWriteOperation: cannot get file context (0x%08x)\n", status);
+        //DBGPRINT("PreWriteOperation: cannot get file context (0x%08x)\n", status);
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
     }
 
     {
         context->Lock.Lock();
-        DbgPrint("context filename %wZ", &context->FileName);
+        DBGPRINT("context filename %wZ", &context->FileName);
         if (!context->Written)
         {
             status = HandleFile(&context->FileName, FltObjects);
             if (!NT_SUCCESS(status))
             {
-                DbgPrint("PreWriteOperation: failed to handle file (0x%08x)\n", status);
+                DBGPRINT("PreWriteOperation: failed to handle file (0x%08x)\n", status);
             }
 
             context->Written = TRUE;
@@ -351,7 +369,7 @@ FLT_POSTOP_CALLBACK_STATUS PostCleanupOperation(_Inout_ PFLT_CALLBACK_DATA Data,
     auto status = FltGetFileContext(FltObjects->Instance, FltObjects->FileObject, (PFLT_CONTEXT*)&context);
     if (!NT_SUCCESS(status) || context == nullptr)
     {
-        // DbgPrint("PostCleanupOperation: cannot get file context (0x%08x)\n", status);
+        // DBGPRINT("PostCleanupOperation: cannot get file context (0x%08x)\n", status);
         return FLT_POSTOP_FINISHED_PROCESSING;
     }
 
@@ -371,7 +389,7 @@ NTSTATUS FilterUnloadCallback(_In_ FLT_FILTER_UNLOAD_FLAGS Flags)
     UNREFERENCED_PARAMETER(Flags);              // A bitmask of flags describing the unload request
     PAGED_CODE();
     FltUnregisterFilter(FilterHandle);
-    DbgPrint("Driver unloaded\n");
+    DBGPRINT("Driver unloaded\n");
     return STATUS_SUCCESS;
 }
 
@@ -389,10 +407,10 @@ NTSTATUS InstanceSetupCallback(_In_ PCFLT_RELATED_OBJECTS FltObjects, _In_ FLT_I
     // UNREFERENCED_PARAMETER(VolumeFilesystemType);   // File system type of the volume (FLT_FILESYSTEM_TYPE enum)
     PAGED_CODE();
 
-    DbgPrint("VolumeFilesystemType %d. Want %d.\n", VolumeFilesystemType, FLT_FSTYPE_NTFS);
+    DBGPRINT("VolumeFilesystemType %d. Want %d.\n", VolumeFilesystemType, FLT_FSTYPE_NTFS);
     if (VolumeFilesystemType != FLT_FSTYPE_NTFS || VolumeDeviceType != FILE_DEVICE_DISK_FILE_SYSTEM)
     {
-        DbgPrint("Not attaching to non-NTFS volume (%d)\n", VolumeFilesystemType); // (13) and (5)
+        DBGPRINT("Not attaching to non-NTFS volume (%d)\n", VolumeFilesystemType); // (13) and (5)
         return STATUS_FLT_DO_NOT_ATTACH;
     }
 
@@ -429,10 +447,20 @@ const FLT_REGISTRATION FilterRegistration = {                               // A
     nullptr, // NormalizeNameComponent
 };
 
+VOID GenerateKey() {
+    LARGE_INTEGER currentSystemTime = { 0 };
+    KeQuerySystemTime(&currentSystemTime);
+    ULONG seed = currentSystemTime.HighPart;
+    auto randomKey = RtlRandomEx(&seed);
+    RtlCopyMemory(g_key, &randomKey, sizeof(g_key));
+    DBGPRINT("randomKey %08x\n", randomKey);
+}
+
 NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
 {
-    DbgPrint("Driver loading\n");
+    DBGPRINT("Driver loading\n");
     UNREFERENCED_PARAMETER(RegistryPath);
+    GenerateKey();
     auto status = FltRegisterFilter(    // Registers a minifilter driver
         DriverObject,                   // Pointer to the driver object for the minifilter driver
         &FilterRegistration,            // Pointer to a minifilter driver registration structure
@@ -442,7 +470,7 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING Regi
     if (!NT_SUCCESS(status))
         return status;
 
-    // FltCreateCommunicationPort
+    // FltCreateCommunicationPort to extract key and enhance scenario/challenge?
     status = FltStartFiltering(FilterHandle);
     if (!NT_SUCCESS(status))
         FltUnregisterFilter(FilterHandle);
