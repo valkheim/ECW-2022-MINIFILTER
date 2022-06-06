@@ -5,7 +5,7 @@ CHUNK_SIZE = 7
 KEY_SIZE = 4
 
 # Step 0: read the data
-with open(r".\secret\file.txt.lock", "rb") as fh:
+with open(r"./secret/file.txt.lock", "rb") as fh:
     data = fh.read()
 
 # Step 1: read the key using the xored null bytes of UTF16-LE encoding while skipping BOM

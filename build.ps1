@@ -15,7 +15,7 @@ function CheckLastExitCode {
 # Prepare build
 #cmake -G "Visual Studio 16 2019" -A Win32 -S . -B build/x86
 # cmake -G "Ninja" -A x86 -S . -B build/x86
-cmake -G "Visual Studio 16 2019" -A x64 -S . -B build/x64
+cmake -G "Visual Studio 17 2022" -A x64 -S . -B build/x64
 # cmake -G "Ninja" -A x64  -S . -B build/x64
 
 # Build
