@@ -1,6 +1,6 @@
 # ECW 2022 - minifilter
 
-**Minifilter** was one of the reverse-engineering challenge of the [European Cyber Week](https://www.european-cyber-week.eu/) 2022 challenges designed by Thalium.
+**Minifilter** was one of the reverse-engineering challenge of the [European Cyber Week](https://www.european-cyber-week.eu/) 2022 challenges designed by valkheim @Thalium.
 
 Epreuve de reverse de minifilter.
 On donne un fichier à déchiffrer et le scénario suivant:
